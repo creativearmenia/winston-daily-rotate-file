@@ -656,7 +656,7 @@ DailyRotateFile.prototype._createStream = function ()
                 self._hour = now.getHours();
                 self._minute = now.getMinutes();
                 self._created = 0;
-                return checkFile(self._getFile());
+                return checkFile(self._getFile(true));
             }
 
             createAndFlush(stats.size);
