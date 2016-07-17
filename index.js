@@ -98,8 +98,9 @@ var DailyRotateFile = module.exports = function (options)
     // of files this instance has created and the current
     // size (in bytes) of the current logfile.
     //
+    this._firstRun = true;
     this._size = 0;
-    this._created = 0;
+    this._created = 1;
     this._buffer = [];
     this._draining = false;
     this._failures = 0;
@@ -626,41 +627,58 @@ DailyRotateFile.prototype._createStream = function ()
             fs.unlink(fileToZip)
         }
 
-        fs.stat(fullname, function (err, stats)
+        function fileStat()
         {
-            if (err)
+            fs.stat(fullname, function (err, stats)
             {
-                if (err.code !== 'ENOENT')
+                if (err)
                 {
-                    return self.emit('error', err);
+                    if (err.code !== 'ENOENT')
+                    {
+                        return self.emit('error', err);
+                    }
+
+                    return createAndFlush(0);
                 }
 
-                return createAndFlush(0);
-            }
+                if (!stats || (self.maxsize && stats.size >= self.maxsize))
+                {
+                    //
+                    // If `stats.size` is greater than the `maxsize` for
+                    // this instance then try again
+                    //
+                    return checkFile(self._getFile(true));
+                }
 
-            if (!stats || (self.maxsize && stats.size >= self.maxsize))
+                if (self._filenameHasExpired())
+                {
+                    var now = new Date();
+                    self._year = now.getFullYear();
+                    self._month = now.getMonth();
+                    self._date = now.getDate();
+                    self._hour = now.getHours();
+                    self._minute = now.getMinutes();
+                    self._created = 1;
+                    return checkFile(self._getFile());
+                }
+
+                createAndFlush(stats.size);
+            });
+        }
+
+        if (self._firstRun)
+        {
+            self._initialFileCount(function ()
             {
-                //
-                // If `stats.size` is greater than the `maxsize` for
-                // this instance then try again
-                //
-                return checkFile(self._getFile(true));
-            }
-
-            if (self._filenameHasExpired())
-            {
-                var now = new Date();
-                self._year = now.getFullYear();
-                self._month = now.getMonth();
-                self._date = now.getDate();
-                self._hour = now.getHours();
-                self._minute = now.getMinutes();
-                self._created = 0;
-                return checkFile(self._getFile(true));
-            }
-
-            createAndFlush(stats.size);
-        });
+                self._firstRun = false;
+                target = self._getFile();
+                fullname = path.join(self.dirname, target);
+                fileStat();
+            });
+        } else
+        {
+            fileStat();
+        }
     })(this._getFile());
 };
 
@@ -726,7 +744,7 @@ DailyRotateFile.prototype._lazyDrain = function ()
 
         this._stream.once('drain', function ()
         {
-            this._draining = false;
+            self._draining = false;
             self.emit('logged');
         });
     }
@@ -765,6 +783,82 @@ DailyRotateFile.prototype._filenameHasExpired = function ()
     return ret === 1;
 };
 
+DailyRotateFile.prototype._initialFileCount = function (callback)
+{
+    var self = this;
+    if (this.maxFiles || this.olderThan)
+    {
+        fs.readdir(this.dirname, function (err, files)
+        {
+            if (err)
+            {
+                self.emit('error', err);
+                callback();
+            } else
+            {
+                var fileNames = [];
+                for (var i = 0; i < files.length; i++)
+                {
+                    var file = files[i]
+                    if (file.indexOf(self._basename) == 0 && file.lastIndexOf('.gz') != (file.length - 3))
+                    {
+                        fileNames.push(file);
+                    }
+                }
+
+                async.map(fileNames, function (fileName, cb)
+                {
+                    fs.stat(path.join(self.dirname, fileName), function (err, stat)
+                    {
+                        if (err)
+                        {
+                            return cb(err);
+                        }
+
+                        cb(null, {
+                            name: fileName,
+                            isFile: stat.isFile(),
+                            time: stat.mtime
+                        });
+                    });
+                }, function (err, selectedFiles)
+                {
+                    if (err)
+                    {
+                        self.emit("error", err);
+                        return callback();
+                    }
+
+                    selectedFiles = selectedFiles.filter(function (file)
+                    {
+                        return file.isFile;
+                    });
+
+                    if (selectedFiles.length > 0)
+                    {
+                        selectedFiles.sort(function (filea, fileb)
+                        {
+                            return filea.time < fileb.time;
+                        });
+
+                        var lastFile = selectedFiles[selectedFiles.length - 1].name;
+                        var lastCount = lastFile.substr(lastFile.lastIndexOf(".") + 1);
+                        if (isNaN(lastCount) == false)
+                        {
+                            self._created = parseInt(lastCount);
+                        }
+                    }
+
+
+                    callback();
+                });
+            }
+        });
+    } else
+    {
+        callback();
+    }
+};
 
 DailyRotateFile.prototype._unlinkOldFiles = function ()
 {
@@ -775,7 +869,7 @@ DailyRotateFile.prototype._unlinkOldFiles = function ()
         {
             if (err)
             {
-                this.emit('error', err);
+                self.emit('error', err);
             } else
             {
                 var fileNames = [];
@@ -854,7 +948,6 @@ DailyRotateFile.prototype._unlinkOldFiles = function ()
 
                         });
                     }
-
                 });
             }
         });
